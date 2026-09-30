@@ -12,7 +12,6 @@ def load_image(image_path):
         raise FileNotFoundError(f"Image not found at path: {image_path}")
     return cv2_image
 
-
 # Detect keypoints and compute descriptors using SIFT
 def detect_and_compute_sift(image):
     sift = cv2.SIFT_create()
@@ -83,7 +82,7 @@ def draw_matches(image1, keypoints1, image2, keypoints2, matches):
         image2,
         keypoints2,
         matches,
-        None,
+        None, # type: ignore
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
     ) # type: ignore
 
@@ -142,4 +141,73 @@ if __name__ == "__main__":
     # PART 3: Homography Estimation
     ############################################################################
     
+    def project(H, pts):                            # matrix multiply, then homogenous divide
+        ph = np.column_stack([pts, np.ones(len(pts))]) @ H.T
+        return ph[:, :2] / ph[:, 2:3]
     
+    def mean_err(H, src, dst):
+        return np.linalg.norm(project(H, src) - dst, axis=1).mean()
+
+    def normalize_points(points):
+        points = np.asarray(points, dtype=np.float64)
+        center = points.mean(axis=0)
+        distances = np.linalg.norm(points - center, axis=1)
+        mean_distance = distances.mean()
+        if mean_distance == 0:
+            raise ValueError("Cannot normalize coincident points.")
+
+        scale = np.sqrt(2.0) / mean_distance
+        transform = np.array([
+            [scale, 0.0, -scale * center[0]],
+            [0.0, scale, -scale * center[1]],
+            [0.0, 0.0, 1.0],
+        ])
+        homogeneous = np.column_stack([points, np.ones(len(points))])
+        normalized = (transform @ homogeneous.T).T
+        return normalized[:, :2], transform
+
+    def find_homography(src, dst):
+        if len(src) != len(dst) or len(src) < 4:
+            raise ValueError("Homography estimation requires at least four pairs.")
+
+        normalized_src, src_transform = normalize_points(src)
+        normalized_dst, dst_transform = normalize_points(dst)
+
+        # Solve DLT in normalized coordinates for numerical stability.
+        A = []
+        for (x, y), (u, v) in zip(normalized_src, normalized_dst):
+            A.append([-x, -y, -1, 0, 0, 0, u*x, u*y, u])
+            A.append([0, 0, 0, -x, -y, -1, v*x, v*y, v])
+
+        A = np.array(A)
+        _, _, Vt = np.linalg.svd(A)
+        normalized_H = Vt[-1].reshape(3, 3)
+
+        H = np.linalg.inv(dst_transform) @ normalized_H @ src_transform
+        return H / H[2, 2]
+    
+    H_true = np.array([[ 0.9,   0.1,  40.],
+                    [-0.05,  1.1,  20.],
+                    [ 3e-4, -2e-4,  1. ]])       # nonzero bottom row: real perspective
+    
+    src = np.array([[50., 40.], [600., 70.], [560., 430.], [80., 400.]])
+    dst = project(H_true, src)                      # (88.38, 61.07)  (503.43, 57.46) ...
+    H = find_homography(src, dst)                   # your HW1 code (DLT) goes here 
+    print("Exact 4-point mean error:", mean_err(H, src, dst), "px")
+
+    rng = np.random.default_rng(0)
+    src = rng.uniform([0, 0], [640, 480], size=(20, 2))   # 20 points over the frame
+    dest = project(H_true, src)
+
+    H = find_homography(src, dest)
+    print("Exact 20-point mean error:", mean_err(H, src, dest), "px")
+
+    noisy = dest + rng.normal(0, 0.5, dest.shape)          # sigma = 0.5 px
+    H = find_homography(src, noisy)
+
+    print("Noisy fit error:", mean_err(H, src, noisy), "px")
+    print("Noisy fit error against clean points:", mean_err(H, src, dest), "px")
+
+    ############################################################################
+    # PART 4: Basic Robust Estimation with RANSAC
+    ############################################################################
