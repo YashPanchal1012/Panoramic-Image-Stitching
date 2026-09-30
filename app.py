@@ -1,15 +1,12 @@
+import os
+
 import cv2
+import numpy as np
+
+def save_image(image, filename):
+    cv2.imwrite(filename, image)
 
 def load_image(image_path):
-    """
-    Load an image from the specified path.
-
-    Args:
-        image_path (str): The path to the image file.
-
-    Returns:
-        numpy.ndarray: The loaded image.
-    """
     cv2_image = cv2.imread(image_path)
     if cv2_image is None:
         raise FileNotFoundError(f"Image not found at path: {image_path}")
@@ -18,31 +15,12 @@ def load_image(image_path):
 
 # Detect keypoints and compute descriptors using SIFT
 def detect_and_compute_sift(image):
-    """
-    Detect keypoints and compute descriptors using SIFT.
-
-    Args:
-        image (numpy.ndarray): The input image.
-
-    Returns:
-        tuple: A tuple containing the detected keypoints and their descriptors.
-    """
     sift = cv2.SIFT_create()
     keypoints, descriptors = sift.detectAndCompute(image, None)
     return keypoints, descriptors
 
 # keypoint visualization
 def draw_keypoints(image, keypoints):
-    """
-    Draw keypoints on the image.
-
-    Args:
-        image (numpy.ndarray): The input image.
-        keypoints (list): A list of detected keypoints.
-
-    Returns:
-        numpy.ndarray: The image with keypoints drawn.
-    """
     output_image = cv2.UMat(image)
     cv2.drawKeypoints(
         image,
@@ -54,62 +32,66 @@ def draw_keypoints(image, keypoints):
 
 # descriptor matching
 def match_descriptors(descriptors1, descriptors2):
-    """
-    Match descriptors between two sets using FLANN-based matcher.
+    if descriptors1 is None or descriptors2 is None or len(descriptors2) < 2:
+        return []
 
-    Args:
-        descriptors1 (numpy.ndarray): Descriptors from the first image.
-        descriptors2 (numpy.ndarray): Descriptors from the second image.
+    descriptors1 = np.asarray(descriptors1, dtype=np.float32)
+    descriptors2 = np.asarray(descriptors2, dtype=np.float32)
+    matches = []
 
-    Returns:
-        list: A list of matched keypoints.
-    """
-    # FLANN parameters
-    FLANN_INDEX_KDTREE = 1
-    index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-    search_params = dict(checks=50)
+    # Process chunks to avoid allocating a full descriptor-distance tensor.
+    for start in range(0, len(descriptors1), 128):
+        end = min(start + 128, len(descriptors1))
+        distances = np.sum(
+            (descriptors1[start:end, None, :] - descriptors2[None, :, :]) ** 2,
+            axis=2,
+        )
+        nearest = np.argpartition(distances, 1, axis=1)[:, :2]
+        for local_index, pair in enumerate(nearest):
+            first, second = pair[np.argsort(distances[local_index, pair])]
+            first_distance = float(np.sqrt(distances[local_index, first]))
+            second_distance = float(np.sqrt(distances[local_index, second]))
+            first_match = cv2.DMatch(
+                start + local_index,
+                int(first),
+                0,
+                first_distance,
+            )
+            second_match = cv2.DMatch(
+                start + local_index,
+                int(second),
+                0,
+                second_distance,
+            )
+            matches.append((first_match, second_match))
 
-    flann = cv2.FlannBasedMatcher(index_params, search_params)
-    matches = flann.knnMatch(descriptors1, descriptors2, k=2)
+    return matches
 
-    # Apply Lowe's ratio test
-    good_matches = []
-    for m, n in matches:
-        if m.distance < 0.7 * n.distance:
-            good_matches.append(m)
 
-    return good_matches
+def ratio_test(matches, ratio_threshold=0.7):
+    return [
+        first_match
+        for first_match, second_match in matches
+        if first_match.distance < ratio_threshold * second_match.distance
+    ]
 
 # matching visualization
 def draw_matches(image1, keypoints1, image2, keypoints2, matches):
-    """
-    Draw matches between two images.
-
-    Args:
-        image1 (numpy.ndarray): The first input image.
-        keypoints1 (list): Keypoints from the first image.
-        image2 (numpy.ndarray): The second input image.
-        keypoints2 (list): Keypoints from the second image.
-        matches (list): A list of matched keypoints.
-
-    Returns:
-        numpy.ndarray: The image with matches drawn.
-    """
-    output_image = cv2.UMat()
-    cv2.drawMatches(
+    return cv2.drawMatches(
         image1,
         keypoints1,
         image2,
         keypoints2,
         matches,
-        output_image,
+        None,
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-    )
-    return output_image.get()
+    ) # type: ignore
 
 if __name__ == "__main__":
 
-    # SET 1 - Fixed center rotation
+    ############################################################################
+    # PART 1: Image Capture and Feature Extraction
+    ############################################################################
 
     # Load images
     image_1 = load_image("Images/Set1_1.jpeg")
@@ -133,14 +115,31 @@ if __name__ == "__main__":
         for image in output_images
     ]
 
-    # Display keypoints
-    combined_output = cv2.hconcat(resized_images)
-    cv2.imshow("Keypoints", combined_output)
+    os.makedirs("outputs", exist_ok=True)
+    save_image(cv2.hconcat(resized_images), "outputs/Set1_keypoints.jpg")
+
+    ############################################################################
+    # PART 2: Descriptor Matching
+    ############################################################################
 
     # Draw matches
-    matches = match_descriptors(descriptors1, descriptors2)
-    matched_image = draw_matches(image_1, keypoints1, image_2, keypoints2, matches)
-    cv2.imshow("Matches", matched_image)
+    nearest_matches = match_descriptors(descriptors1, descriptors2)
+    candidate_matches = [first_match for first_match, _ in nearest_matches]
+    matches = ratio_test(nearest_matches)
+    print("Keypoints in Image 1:", len(keypoints1))
+    print("Keypoints in Image 2:", len(keypoints2))
+    print("Candidate matches:", len(candidate_matches))
+    print("Matches after ratio test:", len(matches))
 
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    matched_image_before = draw_matches(
+        image_1, keypoints1, image_2, keypoints2, candidate_matches
+    )
+    matched_image = draw_matches(image_1, keypoints1, image_2, keypoints2, matches)
+    save_image(matched_image_before, "outputs/Set1_matches_before_ratio.jpg")
+    save_image(matched_image, "outputs/Set1_matches_after_ratio.jpg")
+
+    ############################################################################
+    # PART 3: Homography Estimation
+    ############################################################################
+    
+    
