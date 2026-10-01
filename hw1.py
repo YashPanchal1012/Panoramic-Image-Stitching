@@ -286,4 +286,140 @@ if __name__ == "__main__":
     # PART 5: Warping and Compositing
     ############################################################################
 
+    def warp_image(image, image_to_canvas, canvas_shape):
+        canvas_height, canvas_width = canvas_shape
+        rows, cols = np.indices((canvas_height, canvas_width), dtype=np.float64)
+
+        canvas_points = np.column_stack([cols.ravel(), rows.ravel(), np.ones(rows.size)])
+
+        source = (np.linalg.inv(image_to_canvas) @ canvas_points.T).T
+        source = source[:, :2] / source[:, 2:3]
+        source_x = source[:, 0].reshape(canvas_shape).astype(np.float32)
+        source_y = source[:, 1].reshape(canvas_shape).astype(np.float32)
+
+        valid = (
+            np.isfinite(source_x)
+            & np.isfinite(source_y)
+            & (source_x >= 0)
+            & (source_x <= image.shape[1] - 1)
+            & (source_y >= 0)
+            & (source_y <= image.shape[0] - 1)
+        )
+
+        warped = cv2.remap(
+            image,
+            source_x,
+            source_y,
+            cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+        )
+
+        return warped, valid
+
+    image_2_to_image_1 = np.linalg.inv(H_after_refit)
+
+    corners_1 = np.array([
+        [0, 0],
+        [image_1.shape[1] - 1, 0],
+        [image_1.shape[1] - 1, image_1.shape[0] - 1],
+        [0, image_1.shape[0] - 1],
+    ], dtype=np.float64)
+
+    corners_2 = np.array([
+        [0, 0],
+        [image_2.shape[1] - 1, 0],
+        [image_2.shape[1] - 1, image_2.shape[0] - 1],
+        [0, image_2.shape[0] - 1],
+    ], dtype=np.float64)
+
+    transformed_corners = np.vstack([
+        corners_1,
+        project(image_2_to_image_1, corners_2),
+    ])
+
+    minimum = np.floor(transformed_corners.min(axis=0)).astype(int)
+    maximum = np.ceil(transformed_corners.max(axis=0)).astype(int)
+
+    offset = np.array([
+        [1.0, 0.0, -minimum[0]],
+        [0.0, 1.0, -minimum[1]],
+        [0.0, 0.0, 1.0],
+    ])
+
+    canvas_shape = (
+        int(maximum[1] - minimum[1] + 1),
+        int(maximum[0] - minimum[0] + 1),
+    )
+
+    warped_1, valid_1 = warp_image(image_1, offset, canvas_shape)
+    warped_2, valid_2 = warp_image(image_2, offset @ image_2_to_image_1, canvas_shape)
+
+    panorama = np.zeros_like(warped_1)
+    panorama[valid_1] = warped_1[valid_1]
+    panorama[valid_2] = warped_2[valid_2]
+
+    save_image(panorama, "outputs/Set1_panorama.jpg")
+    print("Panorama canvas:", canvas_shape[1], "x", canvas_shape[0])
+    print("Reference image: Set1_1.jpeg")
+
+    def transform_corners(corners, image_to_canvas):
+        homogeneous = np.column_stack([corners, np.ones(len(corners))])
+        transformed = (image_to_canvas @ homogeneous.T).T
+        return transformed[:, :2] / transformed[:, 2:3]
+
+    boundary_image = panorama.copy()
+    boundary_1 = np.round(transform_corners(corners_1, offset)).astype(np.int32)
+    boundary_2 = np.round(
+        transform_corners(corners_2, offset @ image_2_to_image_1)
+    ).astype(np.int32)
+
+    cv2.polylines(boundary_image, [boundary_1], True, (255, 0, 0), 6)
+    cv2.polylines(boundary_image, [boundary_2], True, (0, 255, 255), 6)
+
+    save_image(boundary_image, "outputs/Set1_panorama_annotated.jpg")
+
+    # Synthetic warp checks with identifiable landmarks.
+    test_image = np.zeros((80, 100, 3), dtype=np.uint8)
+    landmarks = np.array([[20, 20], [70, 25], [35, 60]], dtype=np.float64)
+
+    for x, y in landmarks.astype(int):
+        cv2.rectangle(test_image, (x - 2, y - 2), (x + 2, y + 2), (255, 255, 255), -1)
+
+    def check_warp(name, transform, offset):
+        image_to_canvas = offset @ transform
+        warped, valid = warp_image(test_image, image_to_canvas, (140, 180))
+        expected = project(image_to_canvas, landmarks)
+
+        for x, y in np.round(expected).astype(int):
+            patch = warped[max(0, y - 2):y + 3, max(0, x - 2):x + 3]
+            
+            if not valid[y, x] or patch.max() < 200:
+                raise AssertionError(f"{name} landmark check failed at {(x, y)}")
+            
+        save_image(warped, f"outputs/synthetic_warp_{name}.png")
+
+        print(f"Synthetic {name} transform:\n", transform)
+        print(f"Synthetic {name} landmarks verified at:", expected.astype(int).tolist())
+
+    test_offset = np.array([
+        [1.0, 0.0, 30.0],
+        [0.0, 1.0, 25.0],
+        [0.0, 0.0, 1.0],
+    ])
+
+    check_warp(
+        "translation",
+        np.array([[1.0, 0.0, -20.0], [0.0, 1.0, -15.0], [0.0, 0.0, 1.0]]),
+        test_offset,
+    )
+    check_warp(
+        "scale",
+        np.array([[1.4, 0.0, 0.0], [0.0, 1.4, 0.0], [0.0, 0.0, 1.0]]),
+        test_offset,
+    )
+
+    save_image(test_image, "outputs/synthetic_warp_input.png")
+
+    
+
     
