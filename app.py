@@ -38,31 +38,24 @@ def match_descriptors(descriptors1, descriptors2):
     descriptors2 = np.asarray(descriptors2, dtype=np.float32)
     matches = []
 
-    # Process chunks to avoid allocating a full descriptor-distance tensor.
-    for start in range(0, len(descriptors1), 128):
-        end = min(start + 128, len(descriptors1))
-        distances = np.sum(
-            (descriptors1[start:end, None, :] - descriptors2[None, :, :]) ** 2,
-            axis=2,
-        )
-        nearest = np.argpartition(distances, 1, axis=1)[:, :2]
-        for local_index, pair in enumerate(nearest):
-            first, second = pair[np.argsort(distances[local_index, pair])]
-            first_distance = float(np.sqrt(distances[local_index, first]))
-            second_distance = float(np.sqrt(distances[local_index, second]))
-            first_match = cv2.DMatch(
-                start + local_index,
-                int(first),
+    for query_index, descriptor in enumerate(descriptors1):
+        distances = np.sum((descriptors2 - descriptor) ** 2, axis=1)
+        nearest_indices = np.argsort(distances)[:2]
+        first_index, second_index = nearest_indices
+        matches.append((
+            cv2.DMatch(
+                query_index,
+                int(first_index),
                 0,
-                first_distance,
-            )
-            second_match = cv2.DMatch(
-                start + local_index,
-                int(second),
+                float(np.sqrt(distances[first_index])),
+            ),
+            cv2.DMatch(
+                query_index,
+                int(second_index),
                 0,
-                second_distance,
-            )
-            matches.append((first_match, second_match))
+                float(np.sqrt(distances[second_index])),
+            ),
+        ))
 
     return matches
 
@@ -116,6 +109,8 @@ if __name__ == "__main__":
 
     os.makedirs("outputs", exist_ok=True)
     save_image(cv2.hconcat(resized_images), "outputs/Set1_keypoints.jpg")
+    print("Keypoints in Image 1:", len(keypoints1))
+    print("Keypoints in Image 2:", len(keypoints2))
 
     ############################################################################
     # PART 2: Descriptor Matching
@@ -125,8 +120,7 @@ if __name__ == "__main__":
     nearest_matches = match_descriptors(descriptors1, descriptors2)
     candidate_matches = [first_match for first_match, _ in nearest_matches]
     matches = ratio_test(nearest_matches)
-    print("Keypoints in Image 1:", len(keypoints1))
-    print("Keypoints in Image 2:", len(keypoints2))
+    
     print("Candidate matches:", len(candidate_matches))
     print("Matches after ratio test:", len(matches))
 
@@ -141,7 +135,7 @@ if __name__ == "__main__":
     # PART 3: Homography Estimation
     ############################################################################
     
-    def project(H, pts):                            # matrix multiply, then homogenous divide
+    def project(H, pts):           # matrix multiply, then homogenous divide
         ph = np.column_stack([pts, np.ones(len(pts))]) @ H.T
         return ph[:, :2] / ph[:, 2:3]
     
@@ -188,25 +182,25 @@ if __name__ == "__main__":
     
     H_true = np.array([[ 0.9,   0.1,  40.],
                     [-0.05,  1.1,  20.],
-                    [ 3e-4, -2e-4,  1. ]])       # nonzero bottom row: real perspective
+                    [ 3e-4, -2e-4,  1. ]]) # nonzero bottom row: real perspective
     
     src = np.array([[50., 40.], [600., 70.], [560., 430.], [80., 400.]])
-    dst = project(H_true, src)                      # (88.38, 61.07)  (503.43, 57.46) ...
-    H = find_homography(src, dst)                   # your HW1 code (DLT) goes here 
-    print("Exact 4-point mean error:", mean_err(H, src, dst), "px")
+    dst = project(H_true, src)          # (88.38, 61.07)  (503.43, 57.46) ...
+    H = find_homography(src, dst)       # your HW1 code (DLT) goes here 
+    print("Exact 4-point mean error:", f"{mean_err(H, src, dst):.2e}", "px")
 
     rng = np.random.default_rng(0)
     src = rng.uniform([0, 0], [640, 480], size=(20, 2))   # 20 points over the frame
     dest = project(H_true, src)
 
     H = find_homography(src, dest)
-    print("Exact 20-point mean error:", mean_err(H, src, dest), "px")
+    print("Exact 20-point mean error:", f"{mean_err(H, src, dest):.2e}", "px")
 
-    noisy = dest + rng.normal(0, 0.5, dest.shape)          # sigma = 0.5 px
+    noisy = dest + rng.normal(0, 0.5, dest.shape)     # sigma = 0.5 px
     H = find_homography(src, noisy)
 
-    print("Noisy fit error:", mean_err(H, src, noisy), "px")
-    print("Noisy fit error against clean points:", mean_err(H, src, dest), "px")
+    print("Noisy fit error:", f"{mean_err(H, src, noisy):.2f}", "px")
+    print("Noisy fit error against clean points:", f"{mean_err(H, src, dest):.2f}", "px")
 
     ############################################################################
     # PART 4: Basic Robust Estimation with RANSAC
