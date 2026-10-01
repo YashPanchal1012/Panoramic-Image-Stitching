@@ -205,3 +205,85 @@ if __name__ == "__main__":
     ############################################################################
     # PART 4: Basic Robust Estimation with RANSAC
     ############################################################################
+
+    src_points = np.float64([keypoints1[m.queryIdx].pt for m in matches]) # type: ignore
+    dst_points = np.float64([keypoints2[m.trainIdx].pt for m in matches]) # type: ignore
+
+    def non_degenerate(points):
+        a, b, c, d = points
+        ab = b - a
+        ac = c - a
+        ad = d - a
+        area_abc = ab[0] * ac[1] - ab[1] * ac[0]
+        area_abd = ab[0] * ad[1] - ab[1] * ad[0]
+        return abs(area_abc) > 1e-6 or abs(area_abd) > 1e-6
+
+    def ransac(src, dst, threshold=5.0, iterations=1000):
+        rng = np.random.default_rng(0)
+        best_H = None
+        best_mask = None
+        best_count = 0
+
+        for _ in range(iterations):
+            sample_indices = rng.choice(len(src), 4, replace=False)
+            sample_src = src[sample_indices]
+            sample_dst = dst[sample_indices]
+
+            if not non_degenerate(sample_src) or not non_degenerate(sample_dst):
+                continue
+
+            candidate_H = find_homography(sample_src, sample_dst)
+            errors = np.linalg.norm(project(candidate_H, src) - dst, axis=1)
+            
+            inlier_mask = errors < threshold
+            inlier_count = int(inlier_mask.sum())
+
+            if inlier_count > best_count:
+                best_H = candidate_H
+                best_count = inlier_count
+                best_mask = inlier_mask
+
+        return best_H, best_mask
+
+    H_before_refit, inlier_mask = ransac(src_points, dst_points)
+    H_after_refit = find_homography(src_points[inlier_mask], dst_points[inlier_mask])
+
+    before_error = np.linalg.norm(
+        project(H_before_refit, src_points[inlier_mask])
+        - dst_points[inlier_mask], axis=1
+    ).mean()
+
+    after_error = np.linalg.norm(
+        project(H_after_refit, src_points[inlier_mask])
+        - dst_points[inlier_mask], axis=1
+    ).mean()
+
+    print("Total matches:", len(matches))
+    print("RANSAC inliers:", int(inlier_mask.sum()))
+    print("Inlier ratio:", f"{inlier_mask.mean():.2f}")
+    print("Mean inlier error before refit:", f"{before_error:.2f}", "px")
+    print("Mean inlier error after refit:", f"{after_error:.2f}", "px")
+
+    outlier_matches = [m for m, is_inlier in zip(matches, inlier_mask) if not is_inlier]
+    inlier_matches = [m for m, is_inlier in zip(matches, inlier_mask) if is_inlier]
+
+    ransac_image = cv2.drawMatches(
+        image_1, keypoints1, image_2, keypoints2, tuple(outlier_matches), None, # type: ignore
+        (0, 0, 255), flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+    ) # type: ignore
+
+    for match in inlier_matches:
+        point1 = tuple(np.round(keypoints1[match.queryIdx].pt).astype(int))
+        point2 = tuple(
+            np.round(keypoints2[match.trainIdx].pt).astype(int)
+            + np.array([image_1.shape[1], 0])
+        )
+        cv2.line(ransac_image, point1, point2, (0, 255, 0), 1, cv2.LINE_AA)
+
+    save_image(ransac_image, "outputs/Set1_ransac_matches.jpg")
+
+    ############################################################################
+    # PART 5: Warping and Compositing
+    ############################################################################
+
+    
